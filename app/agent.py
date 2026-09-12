@@ -14,8 +14,9 @@ from .tools.supabase_writer import write_result
 # Swap for whatever Bedrock model your AWS account has access to.
 # BedrockModel reads AWS credentials the standard way (env vars, profile, IAM role).
 BEDROCK_MODEL = BedrockModel(
-    model_id="anthropic.claude-3-5-sonnet-20241022-v2:0",
-    region_name="us-east-1",
+    model_id="deepseek.v3-v1:0",
+    region_name="eu-north-1",
+    strict_tools=True,
 )
 
 # ---------------------------------------------------------------------------
@@ -25,30 +26,38 @@ BEDROCK_MODEL = BedrockModel(
 research_agent = Agent(
     name="research_agent",
     description=(
-        "Searches Ugandan case law from Laws.Africa and the user's private legal corpus. "
+        "Searches Ugandan case law from Laws.Africa and searches the web for recent legal developments. "
         "Use for legal precedents, judgments, and research on legal topics."
     ),
     system_prompt=(
         "You are a legal research specialist. Search for relevant Ugandan judgments and "
-        "the user's private legal corpus to find case law, precedents, and legal authorities. "
+        "search the web for recent legal developments vis-a-vis the user's query."
         "Return well-organised findings with citations."
+        "CRITICAL: Only state facts, case names, dates, sentences, or holdings that appear "
+        "explicitly in the tool results you received. Never infer, extrapolate, or invent "
+        "case details, outcomes, or citations. If the tool results don't contain a fact "
+        "you'd need to answer fully, say so explicitly rather than filling the gap."
     ),
     model=BEDROCK_MODEL,
-    tools=[search_laws_africa, search_legal_corpus],
+    tools=[search_laws_africa, web_search,],
 )
 
 case_agent = Agent(
     name="case_agent",
     description=(
-        "Reads the user's case database records and searches the web for recent legal developments. "
-        "Use when the user asks about specific clients, file numbers, or current news."
+        "Reads the user's case database records"
+        "Use when the user asks about specific clients or file numbers."
     ),
     system_prompt=(
-        "You are a case management specialist. Look up the user's case records and search the web "
-        "for current developments relevant to the query. Return clear, factual summaries."
-    ),
+        "You are a case management specialist. Look up the user's case records "
+        "for developments relevant to the query. Return clear, factual summaries.\n\n"
+        "CRITICAL: Only state facts, case names, dates, sentences, or holdings that appear "
+        "explicitly in the tool results you received. Never infer, extrapolate, or invent "
+        "case details, outcomes, or citations. If the tool results don't contain a fact "
+        "you'd need to answer fully, say so explicitly rather than filling the gap."
+        ),
     model=BEDROCK_MODEL,
-    tools=[read_cases_db, web_search],
+    tools=[read_cases_db],
 )
 
 drafting_agent = Agent(
