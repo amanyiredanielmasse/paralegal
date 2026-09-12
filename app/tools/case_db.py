@@ -1,6 +1,7 @@
 import re
 from strands import tool, ToolContext
 from ..lib.supabase_client import get_supabase
+from ..lib.request_context import current_user_id
 
 
 @tool(context=True)
@@ -11,7 +12,10 @@ def read_cases_db(query: str, tool_context: ToolContext) -> str:
     Args:
         query: The user's question about cases, clients, or file numbers
     """
-    user_id: str = tool_context.invocation_state.get("user_id")
+    # NOTE: not tool_context.invocation_state.get("user_id") — Strands' agent-as-tool
+    # wrapper doesn't forward invocation_state to sub-agents, so that would be None
+    # whenever this runs inside case_agent (which is the whole point of this tool).
+    user_id: str | None = current_user_id.get()
     supabase = get_supabase()
     q = query.lower()
 

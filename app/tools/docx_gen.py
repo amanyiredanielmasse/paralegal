@@ -3,11 +3,12 @@ import io
 from datetime import datetime, timezone
 from strands import tool, ToolContext
 from docx import Document
-from docx.shared import Pt, Inches, RGBColor
+from docx.shared import Pt, Inches, Mm, RGBColor
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml.ns import qn
 from docx.oxml import OxmlElement
 from ..lib.supabase_client import get_supabase
+from ..lib.request_context import current_user_id
 
 
 # ---------------------------------------------------------------------------
@@ -42,9 +43,17 @@ def _add_runs(para, runs: list[dict]):
 def _markdown_to_docx(markdown: str) -> Document:
     doc = Document()
 
-    # Page layout: A4, 1-inch margins
+    # Page layout: A4, 1-inch margins.
+    # NOTE: this used to compute page_width as int(11906 * 914.4 / 12240),
+    # a "twips→EMU" formula that was wrong by roughly 1000x (it produced
+    # ~889 EMU, versus the ~7,560,000 EMU an A4 page actually needs — EMU is
+    # 914400 per inch). The result was a page rendered ~1 pixel wide, with
+    # every paragraph wrapped to a single character per line. Mm()/Inches()
+    # do the correct unit conversion internally, so use those instead of
+    # hand-rolled math.
     section = doc.sections[0]
-    section.page_width = int(11906 * 914.4 / 12240)   # twips→EMU approximation
+    section.page_width = Mm(210)
+    section.page_height = Mm(297)
     section.left_margin = Inches(1)
     section.right_margin = Inches(1)
     section.top_margin = Inches(1)
@@ -200,7 +209,12 @@ def generate_docx(markdown_content: str, filename: str, tool_context: ToolContex
         markdown_content: The full submission text in markdown
         filename: Desired filename for the document (without extension is fine)
     """
-    user_id: str = tool_context.invocation_state.get("user_id")
+    # See case_db.py for why this reads from the contextvar, not invocation_state.
+    user_id: str | None = current_user_id.get()
+    if not user_id:
+        # Refuse rather than silently write to a shared "None/..." storage path,
+        # which would mix documents across users.
+        return "Error: could not determine user_id for this request; document was not saved."
     supabase = get_supabase()
 
     # Convert markdown → docx bytes

@@ -1,2 +1,13 @@
 .env
 .venv
+
+# Python
+__pycache__/
+*.pyc
+
+# Node (frontend)
+node_modules/
+package-lock.json
+
+# Supabase CLI local state
+supabase/.temp/

@@ -1,12 +1,56 @@
 from strands import Agent
+from strands.hooks import AfterToolCallEvent, HookProvider, HookRegistry
 from strands.models import BedrockModel
 
+from .lib.request_context import current_tracking
 from .tools.laws_africa import search_laws_africa
 from .tools.corpus_search import search_legal_corpus
 from .tools.case_db import read_cases_db
 from .tools.web_search import web_search
 from .tools.docx_gen import generate_docx
-from .tools.supabase_writer import write_result
+
+# ---------------------------------------------------------------------------
+# Tool-call tracking hook
+# ---------------------------------------------------------------------------
+# Registered on every agent below (orchestrator + all sub-agents) so it sees
+# tool calls at every level of the delegation tree, e.g. search_laws_africa
+# firing *inside* research_agent, not just research_agent itself being called
+# as a tool by the orchestrator.
+#
+# NOTE: this reads/writes lib.request_context.current_tracking (a ContextVar),
+# NOT event.invocation_state. Strands' _AgentAsTool wrapper does not forward
+# invocation_state to sub-agents (it calls self._agent.stream_async(prompt, ...)
+# with no invocation_state kwarg at all), so a hook relying on invocation_state
+# would only ever see the outer agent's own tool calls, never what happens
+# inside research_agent/case_agent/drafting_agent. contextvars propagate
+# correctly through the plain `await` chain _AgentAsTool uses instead.
+
+
+class ToolCallTracker(HookProvider):
+    def register_hooks(self, registry: HookRegistry, **kwargs) -> None:
+        registry.add_callback(AfterToolCallEvent, self._on_after_tool_call)
+
+    def _on_after_tool_call(self, event: AfterToolCallEvent) -> None:
+        tracking = current_tracking.get()
+        if tracking is None:
+            return
+
+        tool_name = event.selected_tool.tool_name if event.selected_tool else event.tool_use.get("name")
+        if tool_name:
+            tracking.tools_used.add(tool_name)
+
+        if tool_name == "generate_docx" and event.result is not None:
+            for block in event.result.get("content", []):
+                text = block.get("text")
+                if text:
+                    tracking.download_url = text
+                    break
+
+
+# Single shared instance — HookProvider itself holds no per-request state,
+# all mutable state lives in each request's invocation_state dict, so one
+# instance is safely reusable across every agent and every concurrent request.
+tool_call_tracker = ToolCallTracker()
 
 # ---------------------------------------------------------------------------
 # Model
@@ -26,12 +70,12 @@ BEDROCK_MODEL = BedrockModel(
 research_agent = Agent(
     name="research_agent",
     description=(
-        "Searches Ugandan case law from Laws.Africa and searches the web for recent legal developments. "
+        "Searches Ugandan case law from Laws.Africa and the web for current legal developments. "
         "Use for legal precedents, judgments, and research on legal topics."
     ),
     system_prompt=(
         "You are a legal research specialist. Search for relevant Ugandan judgments and "
-        "search the web for recent legal developments vis-a-vis the user's query."
+        "the user's private legal corpus to find case law, precedents, and legal authorities. "
         "Return well-organised findings with citations."
         "CRITICAL: Only state facts, case names, dates, sentences, or holdings that appear "
         "explicitly in the tool results you received. Never infer, extrapolate, or invent "
@@ -39,14 +83,15 @@ research_agent = Agent(
         "you'd need to answer fully, say so explicitly rather than filling the gap."
     ),
     model=BEDROCK_MODEL,
-    tools=[search_laws_africa, web_search,],
+    tools=[search_laws_africa, web_search],
+    hooks=[tool_call_tracker],
 )
 
 case_agent = Agent(
     name="case_agent",
     description=(
-        "Reads the user's case database records"
-        "Use when the user asks about specific clients or file numbers."
+        "Reads the user's case database records and user's private legal corpus. "
+        "Use when the user asks about specific clients, file numbers, or cases."
     ),
     system_prompt=(
         "You are a case management specialist. Look up the user's case records "
@@ -55,9 +100,10 @@ case_agent = Agent(
         "explicitly in the tool results you received. Never infer, extrapolate, or invent "
         "case details, outcomes, or citations. If the tool results don't contain a fact "
         "you'd need to answer fully, say so explicitly rather than filling the gap."
-        ),
+    ),
     model=BEDROCK_MODEL,
-    tools=[read_cases_db],
+    tools=[read_cases_db, search_legal_corpus],
+    hooks=[tool_call_tracker],
 )
 
 drafting_agent = Agent(
@@ -74,6 +120,7 @@ drafting_agent = Agent(
     ),
     model=BEDROCK_MODEL,
     tools=[generate_docx],
+    hooks=[tool_call_tracker],
 )
 
 # ---------------------------------------------------------------------------
@@ -88,21 +135,23 @@ For conversational legal questions:
 - Delegate to case_agent for specific client cases or current news
 - Use at most 2 sub-agent calls per response
 - Synthesize results into a clear direct answer
-- Finally, use the write_result tool to save the results to the database.
 
 For document drafting requests:
 - Delegate to research_agent to gather legal authorities
 - Delegate to case_agent if a specific client is mentioned
 - Pass gathered context to drafting_agent to produce the Word document
 - Return the download URL with a short summary
-- Finally, use the write_result tool to save the results to the database.
 
-For simple general questions, answer directly without delegating."""
+For simple general questions, answer directly without delegating.
+
+Persistence of the final result is handled automatically after you respond —
+you do not need to save or write anything yourself."""
 
 root_agent = Agent(
     name="orchestrator_agent",
     description="Root orchestrator for the Sophia Ugandan paralegal assistant.",
     system_prompt=ORCHESTRATOR_PROMPT,
     model=BEDROCK_MODEL,
-    tools=[research_agent, case_agent, drafting_agent, write_result],
+    tools=[research_agent, case_agent, drafting_agent],
+    hooks=[tool_call_tracker],
 )

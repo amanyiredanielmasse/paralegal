@@ -87,7 +87,6 @@ export default function ChatTab() {
 
   const endRef = useRef<HTMLDivElement>(null);
   const abortRef = useRef<AbortController | null>(null);
-  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   useEffect(() => {
     endRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -96,7 +95,6 @@ export default function ChatTab() {
   useEffect(() => {
     return () => {
       abortRef.current?.abort();
-      if (pollRef.current) clearInterval(pollRef.current);
     };
   }, []);
 
@@ -125,13 +123,6 @@ export default function ChatTab() {
     setExpandedEntry(null);
   }
 
-  function stopPolling() {
-    if (pollRef.current) {
-      clearInterval(pollRef.current);
-      pollRef.current = null;
-    }
-  }
-
   async function send() {
     const text = input.trim();
     if (!text || busy) return;
@@ -153,120 +144,75 @@ export default function ChatTab() {
       return;
     }
 
-    const url = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/chat`;
+    // Points at the Python/Strands FastAPI backend directly — this used to be
+    // a Supabase Edge Function (functions/v1/chat) that kicked off a background
+    // job and streamed a run_id via SSE, then this component polled
+    // task_results until it flipped to "completed". The FastAPI backend is
+    // synchronous instead (one request, blocks until the agent finishes, and
+    // returns the full result), so this is now a single fetch — no SSE
+    // parsing, no run_id round-trip, no polling loop.
+    //
+    // NOTE: this endpoint has no auth check (hackathon scope) — the session
+    // token isn't actually verified server-side, we just send user_id so
+    // per-user data (cases, corpus, generated documents) stays scoped
+    // correctly.
+    const url = `${import.meta.env.VITE_AGENT_API_URL}/chat`;
     const abort = new AbortController();
     abortRef.current = abort;
 
-    let runId: string | null = null;
+    const startedAt = Date.now();
+    const progressTimer = setInterval(() => {
+      setProgressMsg(getProgressMsg(mode, Date.now() - startedAt));
+    }, 1000);
 
     try {
       const res = await fetch(url, {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${session.access_token}`,
-        },
-        body: JSON.stringify({ messages: apiMessages, mode }),
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          messages: apiMessages,
+          mode,
+          user_id: session.user.id,
+        }),
         signal: abort.signal,
       });
 
       if (!res.ok) throw new Error(await res.text());
 
-      const reader = res.body!.getReader();
-      const decoder = new TextDecoder();
-      let buffer = "";
+      const output = (await res.json()) as Record<string, unknown>;
 
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
+      if (output.error) {
+        throw new Error(String(output.error));
+      }
 
-        buffer += decoder.decode(value, { stream: true });
-        const parts = buffer.split("\n\n");
-        buffer = parts.pop() ?? "";
-
-        for (const part of parts) {
-          const eventLine = part.match(/^event: (.+)$/m)?.[1];
-          const dataLine = part.match(/^data: (.+)$/m)?.[1];
-          if (!eventLine || !dataLine) continue;
-
-          let parsed: Record<string, unknown>;
-          try { parsed = JSON.parse(dataLine); } catch { continue; }
-
-          if (eventLine === "started") {
-            runId = parsed.runId as string;
-          } else if (eventLine === "error") {
-            throw new Error((parsed.message as string) ?? "Failed to start task");
-          }
-        }
+      if (mode === "chat") {
+        setMessages((prev) => [
+          ...prev,
+          {
+            role: "assistant",
+            content: (output.reply as string) ?? "(no reply)",
+            toolsUsed: (output.toolsUsed as string[]) ?? [],
+          },
+        ]);
+      } else {
+        setMessages((prev) => [
+          ...prev,
+          {
+            role: "assistant",
+            content: output.summary as string,
+            downloadUrl: output.downloadUrl as string | undefined,
+            downloadLabel: "Download Court Submission (.docx)",
+          },
+        ]);
       }
     } catch (e: unknown) {
       if ((e as Error).name === "AbortError") return;
       toast.error(e instanceof Error ? e.message : String(e));
+    } finally {
+      clearInterval(progressTimer);
       setBusy(false);
       setProgressMsg("");
-      return;
     }
-
-    if (!runId) {
-      toast.error("Failed to start task — no run ID received");
-      setBusy(false);
-      setProgressMsg("");
-      return;
-    }
-
-    const startedAt = Date.now();
-
-    pollRef.current = setInterval(async () => {
-      setProgressMsg(getProgressMsg(mode, Date.now() - startedAt));
-
-      try {
-        const { data, error } = await supabase
-          .from("task_results")
-          .select("status, output")
-          .eq("run_id", runId)
-          .maybeSingle();
-
-        if (error) { console.error("Poll error:", error); return; }
-        if (!data) return;
-
-        if (data.status === "completed") {
-          stopPolling();
-          setBusy(false);
-          setProgressMsg("");
-
-          const output = data.output as Record<string, unknown>;
-
-          if (mode === "chat") {
-            setMessages((prev) => [
-              ...prev,
-              {
-                role: "assistant",
-                content: (output.reply as string) ?? "(no reply)",
-                toolsUsed: (output.toolsUsed as string[]) ?? [],
-              },
-            ]);
-          } else {
-            setMessages((prev) => [
-              ...prev,
-              {
-                role: "assistant",
-                content: output.summary as string,
-                downloadUrl: output.downloadUrl as string,
-                downloadLabel: "Download Court Submission (.docx)",
-              },
-            ]);
-          }
-        } else if (data.status === "failed") {
-          stopPolling();
-          setBusy(false);
-          setProgressMsg("");
-          const output = data.output as Record<string, unknown>;
-          toast.error((output?.error as string) ?? "Task failed");
-        }
-      } catch (err) {
-        console.error("Poll exception:", err);
-      }
-    }, 3000);
   }
 
   function handleKeyDown(e: React.KeyboardEvent) {

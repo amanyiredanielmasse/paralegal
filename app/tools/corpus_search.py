@@ -1,6 +1,7 @@
 from strands import tool, ToolContext
 from ..lib.supabase_client import get_supabase
 from ..lib.embeddings import embed_text
+from ..lib.request_context import current_user_id
 
 
 @tool(context=True)
@@ -11,7 +12,8 @@ def search_legal_corpus(query: str, tool_context: ToolContext) -> str:
     Args:
         query: The topic or question to search the corpus for
     """
-    user_id: str = tool_context.invocation_state.get("user_id")
+    # See case_db.py for why this reads from the contextvar, not invocation_state.
+    user_id: str | None = current_user_id.get()
     supabase = get_supabase()
 
     embedding = embed_text(query)
