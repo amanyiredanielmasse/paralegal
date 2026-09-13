@@ -1,0 +1,16 @@
+{
+    "repository": {
+        "repositoryArn": "arn:aws:ecr:eu-north-1:363476362777:repository/sophia-agent",
+        "registryId": "363476362777",
+        "repositoryName": "sophia-agent",
+        "repositoryUri": "363476362777.dkr.ecr.eu-north-1.amazonaws.com/sophia-agent",
+        "createdAt": "2026-09-13T08:48:33.068000+00:00",
+        "imageTagMutability": "MUTABLE",
+        "imageScanningConfiguration": {
+            "scanOnPush": false
+        },
+        "encryptionConfiguration": {
+            "encryptionType": "AES256"
+        }
+    }
+}

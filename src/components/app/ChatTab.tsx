@@ -144,19 +144,7 @@ export default function ChatTab() {
       return;
     }
 
-    // Points at the Python/Strands FastAPI backend directly — this used to be
-    // a Supabase Edge Function (functions/v1/chat) that kicked off a background
-    // job and streamed a run_id via SSE, then this component polled
-    // task_results until it flipped to "completed". The FastAPI backend is
-    // synchronous instead (one request, blocks until the agent finishes, and
-    // returns the full result), so this is now a single fetch — no SSE
-    // parsing, no run_id round-trip, no polling loop.
-    //
-    // NOTE: this endpoint has no auth check (hackathon scope) — the session
-    // token isn't actually verified server-side, we just send user_id so
-    // per-user data (cases, corpus, generated documents) stays scoped
-    // correctly.
-    const url = `${import.meta.env.VITE_AGENT_API_URL}/chat`;
+    const url = `/api/chat`;
     const abort = new AbortController();
     abortRef.current = abort;
 

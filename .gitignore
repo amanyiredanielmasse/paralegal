@@ -11,3 +11,7 @@ package-lock.json
 
 # Supabase CLI local state
 supabase/.temp/
+
+#aws
+aws
+awscliv2.zip
