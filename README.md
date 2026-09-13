@@ -13,6 +13,8 @@ Sophia is a multi-agent system that understands the Ugandan legal context. You c
 - **Look up client cases** from your case management database by client name, file number, case type, or status
 - **Find current legal developments** via web search for recent news relevant to a matter
 - **Draft court submissions** in proper Ugandan court format and export them as a Word document (.docx)
+- **Generate monthly and activity reports** as narrative Word documents from your case log
+- **Export your case log** to CSV for a given date range
 
 ---
 
@@ -21,37 +23,48 @@ Sophia is a multi-agent system that understands the Ugandan legal context. You c
 ```
 Frontend (React + TanStack Router)
         │
-        ▼
-Supabase Edge Functions
+        ├── ChatTab  ─────────────▶  /api/chat  ──▶  FastAPI backend (app/main.py)
+        │                                                    │
+        │                                                    ▼
+        │                                            Strands Agents SDK
+        │                                                    │
+        │                                            root_agent (orchestrator / Sophia)
+        │                                                    │
+        │                                    ┌───────────────┼───────────────┐
+        │                                    ▼               ▼               ▼
+        │                            research_agent    case_agent      drafting_agent
+        │                                    │               │               │
+        │                          search_laws_africa   read_cases_db   generate_docx
+        │                          search_legal_corpus   web_search      (python-docx)
+        │                          (Laws.Africa API)     (Tavily)             │
+        │                                                                write_result
+        │                                                              (saves to Supabase)
         │
-        ▼
-Vertex AI Agent Engine  (Python, Google ADK)
-        │
-        ├── OrchestratorAgent  ← root agent / Sophia
-        │       │
-        │       ├── ResearchAgent
-        │       │       ├── search_laws_africa      (Laws.Africa API)
-        │       │       └── search_legal_corpus     (Supabase vector search)
-        │       │
-        │       ├── CaseAgent
-        │       │       ├── read_cases_db           (Supabase cases table)
-        │       │       └── web_search              (Tavily)
-        │       │
-        │       ├── DraftingAgent
-        │       │       └── generate_docx           (python-docx)
-        │       │
-        │       └── write_result                    (saves output to Supabase)
-        │
+        └── AgentTab (Excel/Monthly/Activity reports) ──▶ Supabase Edge Functions
+                                                                    │
+                                                    ┌───────────────┼───────────────┐
+                                                    ▼               ▼               ▼
+                                            excel-export    monthly-report   activity-report
+                                                                    │               │
+                                                                    └───────┬───────┘
+                                                                            ▼
+                                                                     OpenRouter (LLM)
+                                                                            │
+                                                                   in-function .docx builder
+
 Supabase (PostgreSQL + pgvector)
         ├── profiles          user accounts & subscription tier
         ├── cases             client case management records
         ├── user_documents    uploaded files (stored in Supabase Storage)
-        └── legal_corpus_chunks  vectorised document chunks (768-dim embeddings)
+        └── legal_corpus_chunks  vectorised document chunks (1024-dim, OpenRouter embeddings)
 ```
 
-The orchestrator decides which sub-agents to call based on the query. Most responses use at most two sub-agent calls before synthesising a final answer. Every result is persisted back to Supabase via `write_result`.
+There are two independent LLM-backed surfaces in this app, and it's important not to conflate them:
 
-Document embeddings are generated nightly by a Cloud Scheduler job that calls the `/embed` endpoint, using Vertex AI `text-embedding-004` (768 dimensions).
+1. **Chat / drafting agent** (`ChatTab.tsx` → `/api/chat` → `app/main.py` → `app/agent.py`) — a [Strands Agents SDK](https://strandsagents.com) orchestrator running on **Amazon Bedrock** (`deepseek.v3-v1:0`, `eu-north-1`). This is the conversational agent with sub-agents for research, case lookup, and drafting. It is proxied through Vite's dev server (`/api` → `http://backend:8080`) locally, and through whatever reverse proxy fronts the FastAPI container in production.
+2. **Report generation** (`AgentTab.tsx` → Supabase Edge Functions `monthly-report` / `activity-report` / `excel-export`) — separate, simpler Deno functions that call **OpenRouter** directly (`deepseek/deepseek-v4-flash`) to write report narratives, then assemble a `.docx` in-function using a small hand-rolled zip/OOXML writer (see `supabase/functions/_shared/report.ts`). These do not go through the Strands agent at all.
+
+Document embeddings (for the private legal corpus / `pgvector` search) are also generated via **OpenRouter** (`baai/bge-m3`, 1024 dimensions) — see `app/lib/embeddings.py` and `scripts/embed_documents.py`
 
 ---
 
@@ -61,50 +74,55 @@ Document embeddings are generated nightly by a Cloud Scheduler job that calls th
 |---|---|
 | Frontend | React 18, TanStack Router, Tailwind CSS, shadcn/ui |
 | Auth & DB | Supabase (PostgreSQL + pgvector + Row Level Security) |
-| Edge functions | Supabase Edge Functions (Deno/TypeScript) |
-| Agent framework | Google ADK (Agent Development Kit) |
-| Agent runtime | Vertex AI Agent Engine (us-east1) |
-| LLM | Gemini 2.0 Flash |
-| Embeddings | Vertex AI text-embedding-004 |
+| Edge functions | Supabase Edge Functions (Deno/TypeScript) — reports & exports |
+| Agent framework | [Strands Agents SDK](https://strandsagents.com) |
+| Agent runtime | FastAPI (`app/main.py`), containerised via `app/Dockerfile` |
+| Chat/drafting LLM | Amazon Bedrock — `deepseek.v3-v1:0` (`eu-north-1`) |
+| Report-generation LLM | OpenRouter — `deepseek/deepseek-v4-flash` |
+| Embeddings | OpenRouter — `baai/bge-m3` (1024-dim) |
 | Web search | Tavily |
 | Case law | Laws.Africa Judgments API |
-| Document generation | python-docx |
-| Package management | uv |
-| Deployment | agents-cli v0.3.0 |
+| Document generation | `python-docx` (chat/drafting agent) and an in-function OOXML writer (report edge functions) |
+| Package management | Bun (frontend), uv (Python) |
 
 ---
 
 ## Project structure
 
 ```
-paralegal-sophia/
-├── app/                        Python agent (deployed to Vertex AI Agent Engine)
-│   ├── agent.py                Sub-agents and orchestrator definition
-│   ├── agent_runtime_app.py    Agent Engine entrypoint (AgentRuntime class)
-│   ├── main.py                 Local console runner (dev only)
-│   ├── requirements.txt        Python dependencies
+paralegal/
+├── app/                        Python agent backend (FastAPI + Strands)
+│   ├── agent.py                Sub-agents and orchestrator definition (Strands, Bedrock)
+│   ├── main.py                 FastAPI app — exposes POST /chat, GET /healthz
+│   ├── requirements.txt        Python dependencies (strands-agents, boto3, fastapi, ...)
 │   ├── Dockerfile              Container definition
-│   ├── cron.yaml               Nightly embedding job spec
 │   ├── lib/
-│   │   ├── embeddings.py       Vertex AI embedding helper
+│   │   ├── embeddings.py       OpenRouter embedding helper
+│   │   ├── request_context.py  Per-request context vars (user_id, run_id, tool tracking)
 │   │   └── supabase_client.py  Supabase client singleton
 │   └── tools/
 │       ├── laws_africa.py      Laws.Africa case law search
 │       ├── corpus_search.py    Private corpus vector search
 │       ├── case_db.py          Client case database lookup
 │       ├── web_search.py       Tavily web search
-│       ├── docx_gen.py         Word document generation
+│       ├── docx_gen.py         Word document generation (drafting agent)
 │       └── supabase_writer.py  Result persistence
 ├── src/                        React frontend
 │   ├── routes/                 TanStack Router pages
-│   ├── components/app/         Chat, Agent, Cases, Settings tabs
+│   ├── components/app/         ChatTab, AgentTab, LogEntryTab, SettingsTab
 │   └── integrations/supabase/ Supabase client & auth
 ├── supabase/
-│   ├── functions/              Edge functions (chat, drafting, reports, exports)
+│   ├── functions/
+│   │   ├── chat/                (legacy/unused by ChatTab — see note below)
+│   │   ├── monthly-report/      Narrative monthly/quarterly report → .docx (OpenRouter)
+│   │   ├── activity-report/     Field activity report → .docx (OpenRouter)
+│   │   ├── excel-export/        Case log export → .csv
+│   │   ├── court-submission/    Court submission drafting
+│   │   └── _shared/             auth.ts, cors.ts, report.ts (shared report/.docx logic)
 │   └── migrations/             Database schema
 ├── scripts/
-│   └── embed_documents.py      Document embedding pipeline
-├── agents-cli-manifest.yaml    agents-cli deployment config
+│   └── embed_documents.py      Document embedding pipeline (OpenRouter)
+├── docker-compose.yml           Local dev: frontend + backend containers
 ├── pyproject.toml              Python project metadata
 └── .env.example                Required environment variables
 ```
@@ -118,15 +136,15 @@ paralegal-sophia/
 - Node.js 18+ and [Bun](https://bun.sh)
 - Python 3.11+
 - [uv](https://docs.astral.sh/uv/)
-- [Google Cloud CLI](https://cloud.google.com/sdk/docs/install)
+- AWS credentials with Bedrock access (for the chat/drafting agent)
 - A Supabase project
-- A Google Cloud project with Vertex AI enabled
+- An OpenRouter API key (for report generation and embeddings)
 
 ### 1. Clone and install
 
 ```bash
-git clone https://github.com/your-org/paralegal-sophia.git
-cd paralegal-sophia
+git clone https://github.com/amanyiredanielmasse/paralegal.git
+cd paralegal
 
 # Frontend dependencies
 bun install
@@ -146,15 +164,22 @@ Fill in `.env`:
 | Variable | Description |
 |---|---|
 | `SUPABASE_URL` | Your Supabase project URL |
-| `SUPABASE_PUBLISHABLE_KEY` | Supabase anon/public key |
 | `SUPABASE_SERVICE_ROLE_KEY` | Supabase service role key (backend only) |
 | `LAWS_AFRICA_API_KEY` | Laws.Africa API key |
 | `TAVILY_API_KEY` | Tavily search API key |
-| `GOOGLE_CLOUD_PROJECT` | GCP project ID |
-| `GOOGLE_CLOUD_LOCATION` | GCP region (e.g. `us-east1`) |
-| `GEMINI_MODEL` | Gemini model name (e.g. `gemini-2.0-flash`) |
-| `EMBEDDING_MODEL` | Vertex AI embedding model (e.g. `text-embedding-004`) |
-| `CLOUD_RUN_API_KEY` | API key for the nightly embedding cron job |
+| `OPENROUTER_API_KEY` | OpenRouter API key (report generation + embeddings) |
+| `AWS_ACCESS_KEY_ID` | AWS credentials with Bedrock access (chat/drafting agent) |
+| `AWS_SECRET_ACCESS_KEY` | AWS credentials with Bedrock access |
+| `AWS_DEFAULT_REGION` | Should match the Bedrock model's region (`eu-north-1`) |
+| `VITE_AGENT_API_URL` | URL of the FastAPI backend (e.g. `http://localhost:8080`) |
+| `VITE_SUPABASE_URL` | Supabase project URL (frontend) |
+| `VITE_SUPABASE_PUBLISHABLE_KEY` | Supabase anon/public key (frontend) |
+
+Also set `OPENROUTER_API_KEY` (and the other backend secrets it needs — `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`/anon key) as **Supabase Edge Function secrets**, since `monthly-report`, `activity-report`, and the embedding pipeline call OpenRouter directly and don't read from `.env`:
+
+```bash
+supabase secrets set OPENROUTER_API_KEY=sk-or-...
+```
 
 ### 3. Set up the database
 
@@ -169,43 +194,43 @@ supabase db push
 # Frontend
 bun run dev
 
-# Agent (console mode)
+# Agent backend (FastAPI + Strands)
 cd app
-python main.py
+uvicorn main:app --reload --port 8080
+```
+
+Or run both together via Docker Compose:
+
+```bash
+docker compose up
 ```
 
 ---
 
-## Deploying the agent
+## Deploying
 
-The agent is deployed to Vertex AI Agent Engine using `agents-cli`.
-
-```bash
-# Authenticate
-gcloud auth application-default login
-
-# Deploy (takes 5–10 minutes)
-agents-cli deploy
-```
-
-Make sure `agents-cli-manifest.yaml` points to your project and the `GOOGLE_CLOUD_PROJECT` / `GOOGLE_CLOUD_LOCATION` env vars are set before deploying.
-
-To check deployment status after an interruption:
+- **Frontend** — build with `bun run build` and deploy per `wrangler.jsonc` / `Dockerfile.frontend`.
+- **Agent backend** — build the container from `app/Dockerfile` and deploy anywhere that can run a long-lived FastAPI/uvicorn process (it holds no state itself; all persistence goes through Supabase). Make sure the deploy target has AWS credentials with Bedrock access in `eu-north-1` for `deepseek.v3-v1:0`.
+- **Edge functions** — deploy with the Supabase CLI:
 
 ```bash
-agents-cli deploy --status
+supabase functions deploy monthly-report
+supabase functions deploy activity-report
+supabase functions deploy excel-export
+supabase functions deploy court-submission
 ```
 
-### Nightly document embedding
+Make sure `OPENROUTER_API_KEY` is set as a secret on the Supabase project (see above) before deploying — `monthly-report` and `activity-report` will fail at request time (not at deploy time) if it's missing.
 
-Upload documents as `legal_corpus` kind via the app. They are embedded automatically by the nightly Cloud Scheduler job. To run the embedding pipeline manually:
+### Document embedding
+
+Upload documents as `legal_corpus` kind via the app. To run the embedding pipeline manually:
 
 ```bash
-curl -X POST "${CLOUD_RUN_URL}/embed" \
-  -H "x-api-key: ${CLOUD_RUN_API_KEY}" \
-  -H "Content-Type: application/json" \
-  -d '{}'
+uv run python scripts/embed_documents.py
 ```
+
+This embeds any unembedded `legal_corpus_chunks` rows via OpenRouter (`baai/bge-m3`).
 
 ---
 
