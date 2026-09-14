@@ -1,31 +1,17 @@
 from strands import Agent
-from strands.hooks import AfterToolCallEvent, HookProvider, HookRegistry
+from strands.hooks import AfterToolCallEvent, BeforeToolCallEvent, HookProvider, HookRegistry
 from strands.models import BedrockModel
 
-from .lib.request_context import current_tracking
+from .lib.request_context import current_tracking, current_user_id
 from .tools.laws_africa import search_laws_africa
 from .tools.corpus_search import search_legal_corpus
 from .tools.case_db import read_cases_db
 from .tools.web_search import web_search
-from .tools.docx_gen import generate_docx
+from .tools.docx_gen import generate_docx, fetch_writing_sample
 
 # ---------------------------------------------------------------------------
 # Tool-call tracking hook
 # ---------------------------------------------------------------------------
-# Registered on every agent below (orchestrator + all sub-agents) so it sees
-# tool calls at every level of the delegation tree, e.g. search_laws_africa
-# firing *inside* research_agent, not just research_agent itself being called
-# as a tool by the orchestrator.
-#
-# NOTE: this reads/writes lib.request_context.current_tracking (a ContextVar),
-# NOT event.invocation_state. Strands' _AgentAsTool wrapper does not forward
-# invocation_state to sub-agents (it calls self._agent.stream_async(prompt, ...)
-# with no invocation_state kwarg at all), so a hook relying on invocation_state
-# would only ever see the outer agent's own tool calls, never what happens
-# inside research_agent/case_agent/drafting_agent. contextvars propagate
-# correctly through the plain `await` chain _AgentAsTool uses instead.
-
-
 class ToolCallTracker(HookProvider):
     def register_hooks(self, registry: HookRegistry, **kwargs) -> None:
         registry.add_callback(AfterToolCallEvent, self._on_after_tool_call)
@@ -46,11 +32,44 @@ class ToolCallTracker(HookProvider):
                     tracking.download_url = text
                     break
 
-
-# Single shared instance — HookProvider itself holds no per-request state,
-# all mutable state lives in each request's invocation_state dict, so one
-# instance is safely reusable across every agent and every concurrent request.
 tool_call_tracker = ToolCallTracker()
+
+
+# ---------------------------------------------------------------------------
+# Deterministic style-sample injection for drafting_agent
+# --------------------------------------------------------------------------
+
+
+class DraftingSampleInjector(HookProvider):
+    def register_hooks(self, registry: HookRegistry, **kwargs) -> None:
+        registry.add_callback(BeforeToolCallEvent, self._on_before_tool_call)
+
+    def _on_before_tool_call(self, event: BeforeToolCallEvent) -> None:
+        if event.tool_use.get("name") != "drafting_agent":
+            return
+
+        tool_input = event.tool_use.get("input")
+        if not isinstance(tool_input, dict):
+            return
+
+        user_id = current_user_id.get()
+        sample = fetch_writing_sample(user_id) if user_id else ""
+        if not sample:
+            return
+
+        original_prompt = tool_input.get("input", "")
+        tool_input["input"] = (
+            "STYLE REFERENCE — an excerpt from the user's own past court submission. "
+            "Mirror its structure, heading conventions, and tone ONLY. Do NOT copy any "
+            "names, dates, or case facts from it into the new document — use only the "
+            "facts provided below for that.\n\n"
+            f"{sample}\n\n"
+            "---\n\n"
+            f"{original_prompt}"
+        )
+
+
+drafting_sample_injector = DraftingSampleInjector()
 
 # ---------------------------------------------------------------------------
 # Model
@@ -116,7 +135,10 @@ drafting_agent = Agent(
         "You are an expert Ugandan legal drafter. Using the context provided, produce a complete, "
         "formal court submission in proper Ugandan court format. Write in clear legal English with "
         "proper headings, citations, and a prayers/relief section. Then call generate_docx to save "
-        "the document and return the download URL."
+        "the document and return the download URL.\n\n"
+        "If your input begins with a 'STYLE REFERENCE' section, that is an excerpt from the user's "
+        "own past court submission. Mirror its structure, heading conventions, and tone — never copy "
+        "its names, dates, or case facts into the new document."
     ),
     model=BEDROCK_MODEL,
     tools=[generate_docx],
@@ -128,24 +150,25 @@ drafting_agent = Agent(
 # ADK's AgentTool wrapping, just without needing the explicit wrapper class.
 # ---------------------------------------------------------------------------
 
-ORCHESTRATOR_PROMPT = """You are Sophia, an expert Ugandan paralegal assistant.
+ORCHESTRATOR_PROMPT = """You are Sophia, an expert Ugandan paralegal.
 
 For conversational legal questions:
-- Delegate to research_agent for case law and precedents
-- Delegate to case_agent for specific client cases or current news
+- Delegate to research_agent for case law, precedents and current news
+- Delegate to case_agent when the question involves a specific client or case,
+  e.g. status updates, case history, client details and so on
 - Use at most 2 sub-agent calls per response
-- Synthesize results into a clear direct answer
+- Synthesize results into a clear, direct answer
 
 For document drafting requests:
 - Delegate to research_agent to gather legal authorities
-- Delegate to case_agent if a specific client is mentioned
+- Delegate to case_agent if a specific client name or case number is mentioned
 - Pass gathered context to drafting_agent to produce the Word document
 - Return the download URL with a short summary
 
 For simple general questions, answer directly without delegating.
 
 Persistence of the final result is handled automatically after you respond —
-you do not need to save or write anything yourself."""
+you do not need to save or write anything yourself"""
 
 root_agent = Agent(
     name="orchestrator_agent",
@@ -153,5 +176,5 @@ root_agent = Agent(
     system_prompt=ORCHESTRATOR_PROMPT,
     model=BEDROCK_MODEL,
     tools=[research_agent, case_agent, drafting_agent],
-    hooks=[tool_call_tracker],
+    hooks=[tool_call_tracker, drafting_sample_injector],
 )
