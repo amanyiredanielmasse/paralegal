@@ -38,12 +38,6 @@ def read_cases_db(query: str, tool_context: ToolContext) -> str:
     if file_match:
         db_query = db_query.ilike("lac_file_no", f"%{file_match.group(1).strip()}%")
 
-    # Status filter
-    if "open" in q or "pending" in q:
-        db_query = db_query.ilike("status", "%open%")
-    elif "closed" in q or "completed" in q:
-        db_query = db_query.ilike("status", "%closed%")
-
     # Nature of case filter
     nature_keywords = ["robbery", "assault", "theft", "land", "family", "murder", "fraud"]
     for kw in nature_keywords:
