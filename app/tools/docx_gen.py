@@ -12,6 +12,62 @@ from ..lib.request_context import current_user_id
 
 
 # ---------------------------------------------------------------------------
+# Style-reference sample lookup
+# ---------------------------------------------------------------------------
+
+def fetch_writing_sample(user_id: str | None) -> str:
+    """Fetch the user's most recently uploaded court submission sample.
+
+    Returns an empty string if there is none, or if it can't be downloaded/
+    read for any reason — callers should treat that as "no sample available,
+    draft using standard formal Ugandan court submission style."
+    """
+    if not user_id:
+        return ""
+
+    supabase = get_supabase()
+
+    try:
+        doc_row = (
+            supabase.table("user_documents")
+            .select("storage_path, file_name, mime_type")
+            .eq("user_id", user_id)
+            .eq("kind", "court_submission")
+            .order("created_at", desc=True)
+            .limit(1)
+            .execute()
+        )
+    except Exception:
+        return ""
+
+    if not doc_row.data:
+        return ""
+
+    row = doc_row.data[0]
+    storage_path = row["storage_path"]
+    file_name = (row.get("file_name") or "").lower()
+    mime_type = (row.get("mime_type") or "").lower()
+
+    try:
+        file_bytes = supabase.storage.from_("user-documents").download(storage_path)
+    except Exception:
+        return ""
+
+    text = ""
+    try:
+        if file_name.endswith((".txt", ".md")) or "text" in mime_type:
+            text = file_bytes.decode("utf-8", errors="ignore")
+        elif file_name.endswith(".docx") or "wordprocessingml" in mime_type:
+            doc = Document(io.BytesIO(file_bytes))
+            text = "\n".join(p.text for p in doc.paragraphs)
+    except Exception:
+        return ""
+
+    return text.strip()[:6000]
+
+
+
+# ---------------------------------------------------------------------------
 # Inline parser: **bold**, *italic*, plain text
 # ---------------------------------------------------------------------------
 
@@ -36,21 +92,22 @@ def _add_runs(para, runs: list[dict]):
         run.italic = r.get("italic", False)
 
 
+def _shade_cell(cell, hex_color: str):
+    """Set a table cell's background fill (python-docx has no direct API for this)."""
+    tcPr = cell._tc.get_or_add_tcPr()
+    shd = OxmlElement("w:shd")
+    shd.set(qn("w:val"), "clear")
+    shd.set(qn("w:color"), "auto")
+    shd.set(qn("w:fill"), hex_color)
+    tcPr.append(shd)
+
+
 # ---------------------------------------------------------------------------
 # Markdown → python-docx Document
 # ---------------------------------------------------------------------------
 
 def _markdown_to_docx(markdown: str) -> Document:
     doc = Document()
-
-    # Page layout: A4, 1-inch margins.
-    # NOTE: this used to compute page_width as int(11906 * 914.4 / 12240),
-    # a "twips→EMU" formula that was wrong by roughly 1000x (it produced
-    # ~889 EMU, versus the ~7,560,000 EMU an A4 page actually needs — EMU is
-    # 914400 per inch). The result was a page rendered ~1 pixel wide, with
-    # every paragraph wrapped to a single character per line. Mm()/Inches()
-    # do the correct unit conversion internally, so use those instead of
-    # hand-rolled math.
     section = doc.sections[0]
     section.page_width = Mm(210)
     section.page_height = Mm(297)
@@ -71,7 +128,7 @@ def _markdown_to_docx(markdown: str) -> Document:
         raw = lines[i]
         line = raw.rstrip()
 
-        # Heading 1
+        # Heading 1 — navy (#2E4057), matching the report generator's palette
         m = re.match(r"^# (.+)", line)
         if m:
             p = doc.add_heading(level=1)
@@ -80,11 +137,14 @@ def _markdown_to_docx(markdown: str) -> Document:
             run.bold = True
             run.font.size = Pt(16)
             run.font.name = "Times New Roman"
+            run.font.color.rgb = RGBColor(0x2E, 0x40, 0x57)
             p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            p.paragraph_format.space_before = Pt(16)
+            p.paragraph_format.space_after = Pt(6)
             i += 1
             continue
 
-        # Heading 2
+        # Heading 2 — teal (#048A81)
         m = re.match(r"^## (.+)", line)
         if m:
             p = doc.add_heading(level=2)
@@ -94,10 +154,13 @@ def _markdown_to_docx(markdown: str) -> Document:
             run.underline = True
             run.font.size = Pt(14)
             run.font.name = "Times New Roman"
+            run.font.color.rgb = RGBColor(0x04, 0x8A, 0x81)
+            p.paragraph_format.space_before = Pt(12)
+            p.paragraph_format.space_after = Pt(4)
             i += 1
             continue
 
-        # Heading 3
+        # Heading 3 — dark grey, matching report.ts's Heading3 style
         m = re.match(r"^### (.+)", line)
         if m:
             p = doc.add_heading(level=3)
@@ -107,6 +170,9 @@ def _markdown_to_docx(markdown: str) -> Document:
             run.italic = True
             run.font.size = Pt(12)
             run.font.name = "Times New Roman"
+            run.font.color.rgb = RGBColor(0x33, 0x33, 0x33)
+            p.paragraph_format.space_before = Pt(8)
+            p.paragraph_format.space_after = Pt(4)
             i += 1
             continue
 
@@ -176,8 +242,12 @@ def _markdown_to_docx(markdown: str) -> Document:
                             cell = row.cells[ci]
                             cell.text = cell_text
                             if ri == 0:
+                                # Header row: navy fill + bold white text,
+                                # matching the report generator's table style.
+                                _shade_cell(cell, "2E4057")
                                 for run in cell.paragraphs[0].runs:
                                     run.bold = True
+                                    run.font.color.rgb = RGBColor(0xFF, 0xFF, 0xFF)
             doc.add_paragraph()
             continue
 
