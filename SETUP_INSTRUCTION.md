@@ -148,15 +148,4 @@ uv run python scripts/embed_documents.py
 This embeds any unembedded `legal_corpus_chunks` rows via OpenRouter (`baai/bge-m3`).
 
 ---
-
-## Quick reference: what Docker does and doesn't do here
-
-| Task | Handled by Docker Compose? |
-|---|---|
-| Run FastAPI/Strands backend | ✅ Yes (`backend` service) |
-| Run React frontend dev server | ✅ Yes (`frontend` service) |
-| Provision Postgres/pgvector database | ❌ No — use Supabase (hosted or `supabase start` for local) |
-| Push database migrations | ❌ No — `supabase db push` |
-| Deploy edge functions | ❌ No — `supabase functions deploy ...` |
-| Set edge function secrets | ❌ No — `supabase secrets set ...` |
-| Run the embedding pipeline | ❌ No — `uv run python scripts/embed_documents.py` |
+Last but not least, feel free to change the model in `agent.py` to something stronger; we actually encourage you to do this, unless you are being conscious of the cost, in that case, the current model does a pretty good job.
