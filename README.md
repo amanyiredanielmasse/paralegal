@@ -23,7 +23,7 @@ Sophia is a multi-agent system that understands the Ugandan legal context. You c
 ```
 Frontend (React + TanStack Router)
         │
-        ├── ChatTab  ─────────────▶  /api/chat  ──▶  FastAPI backend (app/main.py)
+        ├── Chat/AgentTab  ─────────────▶  /api/chat  ──▶  FastAPI backend (app/main.py)
         │                                                    │
         │                                                    ▼
         │                                            Strands Agents SDK
@@ -40,7 +40,7 @@ Frontend (React + TanStack Router)
         │                                                                write_result
         │                                                              (saves to Supabase)
         │
-        └── AgentTab (Excel/Monthly/Activity reports) ──▶ Supabase Edge Functions
+        └── Automation (Excel/Monthly/Activity reports) ──▶ Supabase Edge Functions
                                                                     │
                                                     ┌───────────────┼───────────────┐
                                                     ▼               ▼               ▼
@@ -113,7 +113,7 @@ paralegal/
 │   └── integrations/supabase/ Supabase client & auth
 ├── supabase/
 │   ├── functions/
-│   │   ├── chat/                (legacy/unused by ChatTab — see note below)
+│   │   ├── chat/                (legacy/unused)
 │   │   ├── monthly-report/      Narrative monthly/quarterly report → .docx (OpenRouter)
 │   │   ├── activity-report/     Field activity report → .docx (OpenRouter)
 │   │   ├── excel-export/        Case log export → .csv
